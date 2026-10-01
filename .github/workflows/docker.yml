@@ -6,35 +6,85 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g. 1.8.0)'
-        required: true
+        description: 'Version tag (e.g. 1.18.0). Defaults to the version in package.json.'
+        required: false
+      latest:
+        description: 'Also move the :latest tag to this build.'
+        type: boolean
+        default: true
 
 concurrency:
   group: docker-publish
   cancel-in-progress: false
+
+# This fork publishes to Docker Hub. The upstream workflow pushed to
+# ghcr.io/jo-inc/camofox-browser, which this repository has no write access to.
+# Credentials come from repository settings, never from this file:
+#   variable DOCKERHUB_USERNAME -- the Docker Hub account (not sensitive, so it
+#                                  stays a variable and shows up in build logs)
+#   secret   DOCKERHUB_TOKEN    -- a Docker Hub access token (masked in logs)
+env:
+  IMAGE_REPO: proxiable-camofox
 
 jobs:
   docker:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set version
+      - name: Check Docker Hub credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
-          else
-            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+          # Fail here with something readable rather than letting the push fail
+          # on a malformed "/image:tag" reference much later in the build.
+          if [ -z "$DOCKERHUB_USERNAME" ]; then
+            echo "::error::repository variable DOCKERHUB_USERNAME is not set" >&2
+            exit 1
           fi
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::repository secret DOCKERHUB_TOKEN is not set" >&2
+            exit 1
+          fi
+
+      - name: Set version
+        env:
+          # Taken through the environment, not interpolated into the script, so a
+          # crafted dispatch input cannot inject shell.
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -eu
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            VERSION="$INPUT_VERSION"
+          elif [ "$GITHUB_REF" != "${GITHUB_REF#refs/tags/v}" ]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="$(node -p "require('./package.json').version")"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Publishing version $VERSION"
+
+      - name: Build the tag list
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          TAG_LATEST: ${{ inputs.latest == null && 'true' || inputs.latest }}
+        run: |
+          set -eu
+          IMAGE="$DOCKERHUB_USERNAME/$IMAGE_REPO"
+          {
+            echo 'TAGS<<EOF'
+            echo "$IMAGE:$VERSION"
+            if [ "$TAG_LATEST" = "true" ]; then echo "$IMAGE:latest"; fi
+            echo EOF
+          } >> "$GITHUB_ENV"
 
       - uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
 
@@ -46,9 +96,7 @@ jobs:
           file: Dockerfile.ci
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/jo-inc/camofox-browser:${{ env.VERSION }}
-            ghcr.io/jo-inc/camofox-browser:latest
+          tags: ${{ env.TAGS }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
