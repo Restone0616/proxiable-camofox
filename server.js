@@ -11,6 +11,7 @@ import { hasGoogleOrganicResults } from './lib/google-serp.js';
 import { loadConfig } from './lib/config.js';
 import { contextIdentityOptions, launchLocale } from './lib/browser-identity.js';
 import { normalizePlaywrightProxy, createProxyPool, buildProxyUrl } from './lib/proxy.js';
+import { createProxyRelay } from './lib/proxy-relay.js';
 import { createFlyHelpers } from './lib/fly.js';
 import { createPluginEvents, loadPlugins, typeEventPayload } from './lib/plugins.js';
 import { requireAuth, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
@@ -679,6 +680,30 @@ function getHostOS() {
 // Proxy strategy for outbound browsing.
 const proxyPool = createProxyPool(CONFIG.proxy);
 
+// The browser never dials the upstream proxy directly. Every proxy handed to
+// Playwright is rewritten to a loopback HTTP listener owned by this relay, which
+// then dials the real upstream using its configured protocol (https = full TLS,
+// socks5 = username/password auth). See lib/proxy-relay.js.
+const proxyRelay = createProxyRelay(CONFIG.proxyRelay);
+
+/**
+ * Rewrite a pool proxy into its local relay endpoint. Falls back to the direct
+ * upstream proxy if the relay cannot be prepared, so a relay failure degrades to
+ * the previous behaviour instead of breaking browsing outright.
+ */
+async function applyProxyRelay(proxy) {
+  if (!proxy || !proxyRelay.enabled) return proxy;
+  try {
+    return await proxyRelay.mapProxy(proxy);
+  } catch (err) {
+    log('warn', 'proxy relay mapping failed; using upstream proxy directly', {
+      error: err.message,
+      server: proxy.server,
+    });
+    return proxy;
+  }
+}
+
 if (proxyPool) {
   log('info', 'proxy pool created', {
     mode: proxyPool.mode,
@@ -688,6 +713,7 @@ if (proxyPool) {
     country: CONFIG.proxy.country || null,
     state: CONFIG.proxy.state || null,
     city: CONFIG.proxy.city || null,
+    relay: proxyRelay.enabled ? 'local' : 'disabled',
   });
 } else {
   log('info', 'no proxy configured');
@@ -1130,7 +1156,7 @@ async function launchBrowserInstance() {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const launchProxy = proxyPool
-      ? proxyPool.getLaunchProxy(proxyPool.canRotateSessions ? `browser-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}` : undefined)
+      ? await applyProxyRelay(proxyPool.getLaunchProxy(proxyPool.canRotateSessions ? `browser-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}` : undefined))
       : null;
 
     let localVirtualDisplay = null;
@@ -1399,11 +1425,11 @@ async function getSession(userId, { trace = false } = {}) {
       };
       let sessionProxy = null;
       if (proxyPool?.canRotateSessions) {
-        sessionProxy = proxyPool.getNext(`ctx-${key}-${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`);
+        sessionProxy = await applyProxyRelay(proxyPool.getNext(`ctx-${key}-${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`));
         contextOptions.proxy = normalizePlaywrightProxy(sessionProxy);
         log('info', 'session proxy assigned', { userId: key, sessionId: sessionProxy.sessionId });
       } else if (proxyPool) {
-        sessionProxy = proxyPool.getNext();
+        sessionProxy = await applyProxyRelay(proxyPool.getNext());
         contextOptions.proxy = normalizePlaywrightProxy(sessionProxy);
         log('info', 'session proxy assigned', { userId: key, proxy: sessionProxy.server });
       }
@@ -7132,6 +7158,9 @@ async function gracefulShutdown(signal) {
 
   server.close();
   stopMemoryReporter();
+  // Release every loopback relay listener; the browser is about to be torn down
+  // and nothing else will dial them.
+  proxyRelay.close();
 
   await pluginEvents.emitAsync('server:shutdown', { signal }).catch((err) => {
     log('error', 'server:shutdown listener failed', { error: err.message });

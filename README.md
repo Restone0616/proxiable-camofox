@@ -389,6 +389,20 @@ When a proxy is configured:
 
 Without a proxy, Camofox does not claim a geolocation or infer one from the host IP. To use a fixed direct-session identity, set both `CAMOFOX_LOCALE` and `CAMOFOX_TIMEZONE`; otherwise Camoufox keeps its own identity defaults.
 
+#### Local relay (the browser never dials the proxy directly)
+
+Whenever a proxy is configured, the browser is **not** pointed at it. Instead the server starts a loopback relay and hands the browser a plain, unauthenticated HTTP proxy on `127.0.0.1`; the relay then dials the real upstream using the protocol and credentials from `PROXY_*`:
+
+```
+browser --HTTP--> 127.0.0.1:<relay port> --(http | https+TLS | socks4 | socks5)--> upstream proxy
+```
+
+This is what makes `PROXY_PROTOCOL=https` (a full TLS handshake to the proxy itself) and `PROXY_PROTOCOL=socks5` with `PROXY_USERNAME`/`PROXY_PASSWORD` auth work reliably, since the browser only ever speaks the HTTP proxy protocol it handles well.
+
+Each distinct upstream endpoint (protocol + host + port + credentials) gets its own relay listener, so per-context rotation still works: a rotated sticky session just gets a fresh local port that already knows which upstream credentials to use. Listeners are recycled when idle. GeoIP is unaffected — Camoufox resolves the exit IP through the relay, so locale/timezone still track the real proxy.
+
+Relaying is on by default whenever a proxy is configured. `PROXY_RELAY=0` disables it and sends the browser straight at the upstream proxy (the previous behaviour).
+
 ### Telemetry
 
 Browser automation fails in ways that are hard to predict -- Cloudflare challenges, site redesigns breaking selectors, redirect loops, dialog storms, renderer crashes. The scope is wide and the failure modes are diverse. Without telemetry, the only signal is "it didn't work."
@@ -669,6 +683,12 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `PROXY_BACKCONNECT_PORT` | Backconnect gateway port | `7000` |
 | `PROXY_COUNTRY` | Target country for proxy geo-targeting | - |
 | `PROXY_STATE` | Target state/region for proxy geo-targeting | - |
+| `PROXY_RELAY` | Route browser traffic through the local relay (`0` to dial the upstream proxy directly) | `1` |
+| `PROXY_RELAY_HOST` | Interface the local relay listeners bind to | `127.0.0.1` |
+| `PROXY_RELAY_MAX_LISTENERS` | Max concurrent local relay listeners before idle ones are recycled | `256` |
+| `PROXY_RELAY_IDLE_TTL_MS` | Evict an idle relay listener after this long | `600000` (10min) |
+| `PROXY_RELAY_CONNECT_TIMEOUT_MS` | Timeout for dialing the upstream proxy | `30000` (30s) |
+| `PROXY_RELAY_TLS_INSECURE` | Skip certificate verification for `https` upstream proxies (`1` to disable) | - |
 | `TAB_INACTIVITY_MS` | Close tabs idle longer than this | `300000` (5min) |
 | `CAMOFOX_CRASH_REPORT_ENABLED` | Enable anonymized crash/hang telemetry (`false` to disable) | `true` |
 | `CAMOFOX_CRASH_REPORT_URL` | Telemetry endpoint ([self-hosted endpoint](#self-hosted-telemetry-endpoint)) | `https://camofox-telemetry.askjo.workers.dev/report` |
