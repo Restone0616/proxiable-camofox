@@ -1386,7 +1386,7 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   }
 }
 
-async function getSession(userId, { trace = false } = {}) {
+async function getSession(userId, { trace = false, proxyOverride = null } = {}) {
   const key = normalizeUserId(userId);
   let session = sessions.get(key);
   
@@ -1436,12 +1436,17 @@ async function getSession(userId, { trace = false } = {}) {
       const contextOptions = {
         viewport: null,
         ...contextIdentityOptions({
-          hasProxy: !!proxyPool,
+          hasProxy: !!(proxyOverride || proxyPool),
           directIdentity: CONFIG.directIdentity,
         }),
       };
       let sessionProxy = null;
-      if (proxyPool?.canRotateSessions) {
+      if (proxyOverride) {
+        // Caller-supplied per-request proxy wins over the env pool.
+        sessionProxy = await applyProxyRelay(proxyOverride);
+        contextOptions.proxy = normalizePlaywrightProxy(sessionProxy);
+        log('info', 'session proxy assigned (per-request)', { userId: key, proxy: proxyOverride.server });
+      } else if (proxyPool?.canRotateSessions) {
         sessionProxy = await applyProxyRelay(proxyPool.getNext(`ctx-${key}-${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`));
         contextOptions.proxy = normalizePlaywrightProxy(sessionProxy);
         log('info', 'session proxy assigned', { userId: key, sessionId: sessionProxy.sessionId });
@@ -2966,11 +2971,29 @@ app.post('/tabs', async (req, res) => {
     createdTabId = null;
   };
   try {
-    const { userId, sessionKey, listItemId, url, trace } = req.body;
+    const { userId, sessionKey, listItemId, url, trace, proxy } = req.body;
     // Accept both sessionKey (preferred) and listItemId (legacy) for backward compatibility
     const resolvedSessionKey = sessionKey || listItemId;
     if (!userId || !resolvedSessionKey) {
       return res.status(400).json({ error: 'userId and sessionKey required' });
+    }
+    // Optional per-request upstream proxy. Overrides the env pool for this
+    // session's context; omitted => fall back to the env PROXY_* configuration.
+    let proxyOverride = null;
+    if (proxy != null) {
+      if (typeof proxy !== 'object' || typeof proxy.server !== 'string') {
+        return res.status(400).json({ error: 'proxy must be an object with a server URL' });
+      }
+      let parsedProxy;
+      try { parsedProxy = new URL(proxy.server); } catch { return res.status(400).json({ error: 'invalid proxy server URL' }); }
+      if (!['http:', 'https:', 'socks4:', 'socks5:'].includes(parsedProxy.protocol)) {
+        return res.status(400).json({ error: 'proxy protocol must be http, https, socks4, or socks5' });
+      }
+      proxyOverride = {
+        server: proxy.server,
+        ...(typeof proxy.username === 'string' ? { username: proxy.username } : {}),
+        ...(typeof proxy.password === 'string' ? { password: proxy.password } : {}),
+      };
     }
 
     // Session overflow redirect (Fly.io only) — if this machine is above its
@@ -2997,7 +3020,7 @@ app.post('/tabs', async (req, res) => {
           { statusCode: 409 },
         );
       }
-      let session = await getSession(userId, { trace: !!trace });
+      let session = await getSession(userId, { trace: !!trace, proxyOverride });
       
       let totalTabs = 0;
       for (const group of session.tabGroups.values()) totalTabs += group.size;
@@ -3051,7 +3074,7 @@ app.post('/tabs', async (req, res) => {
             if (oldSession) {
               await closeSession(key, oldSession, { reason: 'proxy_retry_rotate', clearDownloads: true, clearLocks: true });
             }
-            session = await getSession(userId, { trace: !!trace });
+            session = await getSession(userId, { trace: !!trace, proxyOverride });
             const retryGroup = getTabGroup(session, resolvedSessionKey);
             const { page: retryPage, lease: retryLease } = await createLeasedPage(session);
             tabState = createTabState(retryPage);
