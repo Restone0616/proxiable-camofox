@@ -100,4 +100,8 @@ ENV CAMOFOX_PORT=9377
 
 EXPOSE 9377
 
-CMD ["sh", "-c", "node --max-old-space-size=${MAX_OLD_SPACE_SIZE:-128} server.js"]
+# Absolute path to server.js: a deploy platform that mounts a volume and runs
+# with its working directory set there (e.g. /data) would otherwise resolve the
+# bare "server.js" against that directory and fail with MODULE_NOT_FOUND. All
+# internal paths already resolve via import.meta.url, so only the entry needs it.
+CMD ["sh", "-c", "node --max-old-space-size=${MAX_OLD_SPACE_SIZE:-128} /app/server.js"]
