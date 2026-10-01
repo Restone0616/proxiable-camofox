@@ -486,6 +486,23 @@ app.post('/sessions/:userId/cookies', express.json({ limit: '512kb' }), async (r
   }
 });
 
+// GET /sessions/:userId/cookies/export -- export the session's current cookies as a
+// bare array { cookies: [...] }. Lets a client (e.g. the BookNetwork Worker) read back
+// gate-pass / login cookies before closing the tab. Returns an empty array when the
+// session does not exist (never creates one). Auth matches cookie import: CAMOFOX_API_KEY,
+// or CAMOFOX_ACCESS_KEY as a superkey.
+app.get('/sessions/:userId/cookies/export', authMiddleware(), async (req, res) => {
+  try {
+    const session = sessions.get(normalizeUserId(req.params.userId));
+    if (!session) return res.json({ cookies: [] });
+    const cookies = await session.context.cookies();
+    res.json({ cookies });
+  } catch (err) {
+    log('error', 'cookie export failed', { reqId: req.reqId, error: err.message });
+    res.status(500).json({ error: safeError(err) });
+  }
+});
+
 let browser = null;
 let _lastBrowserPid = null; // Track PID independently for force-kill after close
 let _browserClosePromise = null; // Shared promise for concurrent close serialization
