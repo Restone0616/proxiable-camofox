@@ -697,6 +697,26 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `ENABLE_VNC` | Enable VNC plugin for interactive browser access (`1`) | - |
 | `VNC_PASSWORD` | Password for VNC access (recommended in production) | - |
 | `NOVNC_PORT` | noVNC web UI port | `6080` |
+| `TUNNEL_TOKEN` | Cloudflare tunnel token. When set, a cloudflared tunnel starts and publishes the server; unset = no tunnel | - |
+| `CLOUDFLARED_MAX_RESTARTS` | cloudflared restart budget after a crash (`0` = unlimited) | `0` |
+
+## Cloudflare Tunnel
+
+Reach the server over a Cloudflare Tunnel instead of opening an inbound port. The `cloudflared` binary is baked into the Docker image; the tunnel is **off unless you provide a token**, so a container with no token set behaves exactly as before.
+
+```bash
+docker run -p 9377:9377 \
+  -e TUNNEL_TOKEN=eyJhIjoi...your-tunnel-token... \
+  restone0616/proxiable-camofox
+```
+
+The token comes from a Cloudflare Zero Trust **tunnel** (Networks → Tunnels → create a tunnel → copy the token). In the tunnel's **Public Hostname** config, set the **Service** to `http://localhost:9377` (or whatever `CAMOFOX_PORT` is) — a token-run tunnel is routed by the dashboard, not by this host.
+
+- The tunnel is a side channel: if `cloudflared` crashes it is restarted with backoff, and camofox keeps serving regardless.
+- `GET /cloudflared/status` reports whether the tunnel is enabled/running and the local port it forwards.
+- cloudflared's own knobs (`TUNNEL_REGION`, `TUNNEL_TRANSPORT_PROTOCOL`, `TUNNEL_METRICS`, …) are passed through if set.
+
+> A tunnel exposes this server to the internet. Keep `CAMOFOX_API_KEY` (or an access key) set, and consider putting Cloudflare Access in front of the hostname — the tunnel itself adds no authentication. See [plugins/cloudflared/AGENTS.md](plugins/cloudflared/AGENTS.md).
 
 ## Interactive desktop browser
 
