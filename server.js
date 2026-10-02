@@ -701,7 +701,7 @@ const proxyPool = createProxyPool(CONFIG.proxy);
 // Playwright is rewritten to a loopback HTTP listener owned by this relay, which
 // then dials the real upstream using its configured protocol (https = full TLS,
 // socks5 = username/password auth). See lib/proxy-relay.js.
-const proxyRelay = createProxyRelay(CONFIG.proxyRelay);
+const proxyRelay = createProxyRelay({ ...CONFIG.proxyRelay, accessKey: CONFIG.accessKey });
 
 /**
  * Rewrite a pool proxy into its local relay endpoint. Falls back to the direct
@@ -2979,6 +2979,9 @@ app.post('/tabs', async (req, res) => {
     }
     // Optional per-request upstream proxy. Overrides the env pool for this
     // session's context; omitted => fall back to the env PROXY_* configuration.
+    // A ws/wss server means "tunnel through the BookNetwork Worker /relay"
+    // (proxyId picks the residential proxy on the Worker side; auth is this
+    // container's CAMOFOX_ACCESS_KEY, injected by the relay).
     let proxyOverride = null;
     if (proxy != null) {
       if (typeof proxy !== 'object' || typeof proxy.server !== 'string') {
@@ -2986,13 +2989,14 @@ app.post('/tabs', async (req, res) => {
       }
       let parsedProxy;
       try { parsedProxy = new URL(proxy.server); } catch { return res.status(400).json({ error: 'invalid proxy server URL' }); }
-      if (!['http:', 'https:', 'socks4:', 'socks5:'].includes(parsedProxy.protocol)) {
-        return res.status(400).json({ error: 'proxy protocol must be http, https, socks4, or socks5' });
+      if (!['http:', 'https:', 'socks4:', 'socks5:', 'ws:', 'wss:'].includes(parsedProxy.protocol)) {
+        return res.status(400).json({ error: 'proxy protocol must be http, https, socks4, socks5, ws, or wss' });
       }
       proxyOverride = {
         server: proxy.server,
         ...(typeof proxy.username === 'string' ? { username: proxy.username } : {}),
         ...(typeof proxy.password === 'string' ? { password: proxy.password } : {}),
+        ...(Number.isInteger(proxy.proxyId) ? { proxyId: proxy.proxyId } : {}),
       };
     }
 
