@@ -491,6 +491,69 @@ app.post('/sessions/:userId/cookies', express.json({ limit: '512kb' }), async (r
 // gate-pass / login cookies before closing the tab. Returns an empty array when the
 // session does not exist (never creates one). Auth matches cookie import: CAMOFOX_API_KEY,
 // or CAMOFOX_ACCESS_KEY as a superkey.
+/**
+ * @openapi
+ * /sessions/{userId}/cookies/export:
+ *   get:
+ *     tags: [Sessions]
+ *     summary: Export a user session's current cookies
+ *     description: >
+ *       Symmetric read for the cookie import. Lets a client read back gate-pass / login
+ *       cookies before closing the tab, to persist them across container sleeps and
+ *       instance failover. Never creates a session -- an unknown userId returns an empty
+ *       array. Requires BearerAuth in production.
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Session owner identifier.
+ *     responses:
+ *       200:
+ *         description: The session's cookies, or an empty array when no session exists.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 cookies:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name:
+ *                         type: string
+ *                       value:
+ *                         type: string
+ *                       domain:
+ *                         type: string
+ *                       path:
+ *                         type: string
+ *                       expires:
+ *                         type: number
+ *                       httpOnly:
+ *                         type: boolean
+ *                       secure:
+ *                         type: boolean
+ *                       sameSite:
+ *                         type: string
+ *                         enum: [Strict, Lax, None]
+ *       403:
+ *         description: Forbidden.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Cookie export failed.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 app.get('/sessions/:userId/cookies/export', authMiddleware(), async (req, res) => {
   try {
     const session = sessions.get(normalizeUserId(req.params.userId));
@@ -719,6 +782,17 @@ async function applyProxyRelay(proxy) {
     });
     return proxy;
   }
+}
+
+/**
+ * Identity of the upstream a session's context is pinned to ('env' when it came
+ * from the PROXY_* pool). A context's proxy is fixed at creation, so this lets
+ * /tabs reject a per-request proxy that differs from the live session's instead
+ * of silently sending the request out the wrong exit.
+ */
+function proxyIdentity(proxy) {
+  if (!proxy) return 'env';
+  return [proxy.server, proxy.username ?? '', proxy.password ?? '', proxy.proxyId ?? ''].join('\u0000');
 }
 
 if (proxyPool) {
@@ -1471,7 +1545,7 @@ async function getSession(userId, { trace = false, proxyOverride = null } = {}) 
         }
       }
 
-      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath };
+      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, proxyKey: proxyIdentity(proxyOverride), tracePath };
       sessions.set(key, created);
       await pluginEvents.emitAsync('session:created', { userId: key, context });
       log('info', 'session created', {
@@ -2919,6 +2993,27 @@ app.post('/pressure/cleanup', async (req, res) => {
  *               trace:
  *                 type: boolean
  *                 description: Enable Playwright tracing for this session (screenshots, DOM snapshots, network). Must be set on first tab creation; cannot be added to an existing session.
+ *               proxy:
+ *                 type: object
+ *                 description: >
+ *                   Per-request upstream proxy for this session's context, overriding the
+ *                   PROXY_* pool. Fixed when the session's context is created, so it must
+ *                   match the live session's upstream; omit it to keep whatever the session
+ *                   already uses. The browser never dials it directly -- it goes through the
+ *                   loopback relay, which handles https TLS, SOCKS auth and ws/wss tunnels.
+ *                 required: [server]
+ *                 properties:
+ *                   server:
+ *                     type: string
+ *                     description: "Upstream URL. Scheme must be http, https, socks4, socks5, ws or wss (ws/wss = tunnel through a remote WebSocket relay)."
+ *                     example: socks5://proxy.example.com:1080
+ *                   username:
+ *                     type: string
+ *                   password:
+ *                     type: string
+ *                   proxyId:
+ *                     type: integer
+ *                     description: For ws/wss upstreams, which proxy the remote relay should use.
  *     responses:
  *       200:
  *         description: Tab created.
@@ -2939,7 +3034,7 @@ app.post('/pressure/cleanup', async (req, res) => {
  *                   type: boolean
  *                   description: False when the optional initial document navigation returned HTTP 400 or higher.
  *       400:
- *         description: Missing required fields.
+ *         description: Missing required fields, or a malformed proxy object.
  *         content:
  *           application/json:
  *             schema:
@@ -2951,7 +3046,7 @@ app.post('/pressure/cleanup', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       409:
- *         description: Cannot enable tracing on an existing session.
+ *         description: Cannot enable tracing, or switch proxy, on an existing session.
  *         content:
  *           application/json:
  *             schema:
@@ -3021,6 +3116,17 @@ app.post('/tabs', async (req, res) => {
       if (trace && existing && !existing.tracePath) {
         throw Object.assign(
           new Error('trace must be set on session creation. DELETE /sessions/:userId first to restart with tracing.'),
+          { statusCode: 409 },
+        );
+      }
+      // Same constraint as trace: a context's proxy is fixed when the context is
+      // created. Asking for a different upstream than the live session was built
+      // with cannot be honoured, so say so instead of quietly reusing the old
+      // exit. Omitting `proxy` means "whatever the session already has" and is
+      // always allowed.
+      if (proxyOverride && existing && existing.proxyKey !== proxyIdentity(proxyOverride)) {
+        throw Object.assign(
+          new Error('session already open on a different proxy. DELETE /sessions/:userId first to switch upstreams.'),
           { statusCode: 409 },
         );
       }

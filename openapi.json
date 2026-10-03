@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "camofox-browser",
-    "version": "1.18.0",
+    "version": "1.18.0-hotfix4",
     "description": "Anti-detection browser automation server for AI agents. Accessibility snapshots, element refs, session isolation, cookie import, proxy rotation, and structured logs.",
     "license": {
       "name": "MIT",
@@ -197,6 +197,102 @@
           },
           "403": {
             "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{userId}/cookies/export": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Export a user session's current cookies",
+        "description": "Symmetric read for the cookie import. Lets a client read back gate-pass / login cookies before closing the tab, to persist them across container sleeps and instance failover. Never creates a session -- an unknown userId returns an empty array. Requires BearerAuth in production.\n",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session owner identifier."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session's cookies, or an empty array when no session exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "cookies": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "value": {
+                            "type": "string"
+                          },
+                          "domain": {
+                            "type": "string"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "expires": {
+                            "type": "number"
+                          },
+                          "httpOnly": {
+                            "type": "boolean"
+                          },
+                          "secure": {
+                            "type": "boolean"
+                          },
+                          "sameSite": {
+                            "type": "string",
+                            "enum": [
+                              "Strict",
+                              "Lax",
+                              "None"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Cookie export failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -437,6 +533,30 @@
                   "trace": {
                     "type": "boolean",
                     "description": "Enable Playwright tracing for this session (screenshots, DOM snapshots, network). Must be set on first tab creation; cannot be added to an existing session."
+                  },
+                  "proxy": {
+                    "type": "object",
+                    "description": "Per-request upstream proxy for this session's context, overriding the PROXY_* pool. Fixed when the session's context is created, so it must match the live session's upstream; omit it to keep whatever the session already uses. The browser never dials it directly -- it goes through the loopback relay, which handles https TLS, SOCKS auth and ws/wss tunnels.\n",
+                    "required": [
+                      "server"
+                    ],
+                    "properties": {
+                      "server": {
+                        "type": "string",
+                        "description": "Upstream URL. Scheme must be http, https, socks4, socks5, ws or wss (ws/wss = tunnel through a remote WebSocket relay).",
+                        "example": "socks5://proxy.example.com:1080"
+                      },
+                      "username": {
+                        "type": "string"
+                      },
+                      "password": {
+                        "type": "string"
+                      },
+                      "proxyId": {
+                        "type": "integer",
+                        "description": "For ws/wss upstreams, which proxy the remote relay should use."
+                      }
+                    }
                   }
                 }
               }
@@ -472,7 +592,7 @@
             }
           },
           "400": {
-            "description": "Missing required fields.",
+            "description": "Missing required fields, or a malformed proxy object.",
             "content": {
               "application/json": {
                 "schema": {
@@ -482,7 +602,7 @@
             }
           },
           "409": {
-            "description": "Cannot enable tracing on an existing session.",
+            "description": "Cannot enable tracing, or switch proxy, on an existing session.",
             "content": {
               "application/json": {
                 "schema": {
